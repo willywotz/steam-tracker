@@ -100,7 +100,7 @@ func (st *SteamTracker) Run() error {
 	stopCh := make(chan os.Signal, 1)
 	signal.Notify(stopCh, os.Interrupt, syscall.SIGTERM)
 
-	ticker := time.NewTicker(1 * time.Minute)
+	ticker := time.NewTicker(time.Duration(st.cfg.TaskInterval) * time.Second)
 	defer ticker.Stop()
 
 	go st.task()
@@ -262,7 +262,7 @@ func (st *SteamTracker) task() {
 
 	log.Debug().Msg("Starting task...")
 
-	result, err := GetPlayerSummaries(st.httpClient, st.cfg.SteamAPIKey, st.cfg.SteamID)
+	result, err := GetPlayerSummaries(st.httpClient, st.cfg.SteamAPIKey, st.cfg.SteamID, st.cfg.MaxTaskRetryCount)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to get player summaries")
 		return

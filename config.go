@@ -13,6 +13,9 @@ type Config struct {
 	SteamAPIKey string `json:"steam_api_key"`
 	SteamID     string `json:"steam_id"`
 
+	MaxTaskRetryCount int `json:"max_task_retry_count"`
+	TaskInterval      int `json:"task_interval"` // in seconds
+
 	DisableTask bool `json:"disable_task"`
 }
 
@@ -31,6 +34,12 @@ func (c *Config) Validate() error {
 	}
 	if c.SteamID == "" {
 		return fmt.Errorf("Steam ID cannot be empty")
+	}
+	if c.MaxTaskRetryCount < 1 {
+		return fmt.Errorf("max task retry count must be at least 1")
+	}
+	if c.TaskInterval < 1 {
+		return fmt.Errorf("task interval must be at least 1 second")
 	}
 
 	return nil
