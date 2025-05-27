@@ -202,12 +202,9 @@ func (st *SteamTracker) CreatePlayerEvent(cmd *CreatePlayerEventCommand) (*Playe
 		Str("persona_state", cmd.PersonaState.String())
 	defer func() { event.Send() }()
 
-	playerEvent := PlayerEvent{
-		SteamID:      cmd.SteamID,
-		PersonaName:  cmd.PersonaName,
-		PersonaState: cmd.PersonaState,
-		CreatedAt:    time.Now(),
-	}
+	playerEvent := cmd.PlayerEvent()
+	playerEvent.ID = st.GenerateID()
+	playerEvent.CreatedAt = time.Now()
 
 	err := st.db.WithContext(st.ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(&playerEvent).Error; err != nil {

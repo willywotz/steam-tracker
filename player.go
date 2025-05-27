@@ -24,7 +24,7 @@ type Player struct {
 	// TimeCreated int `json:"time_created"`
 	// PersonaStateFlags int       `json:"persona_state_flags"`
 	// GameExtraInfo     string    `json:"game_extra_info"`
-	// GameID            string    `json:"game_id"`
+	GameID    string    `json:"game_id"`
 	CreatedAt time.Time `json:"created_at" gorm:"index"`
 }
 
@@ -185,6 +185,14 @@ type CreatePlayerEventCommand struct {
 	SteamID      SteamID      `json:"steam_id"`
 	PersonaName  string       `json:"persona_name"`
 	PersonaState PersonaState `json:"persona_state"`
+}
+
+func (cmd *CreatePlayerEventCommand) PlayerEvent() PlayerEvent {
+	return PlayerEvent{
+		SteamID:      cmd.SteamID,
+		PersonaName:  cmd.PersonaName,
+		PersonaState: cmd.PersonaState,
+	}
 }
 
 type GetLatestPlayerEventQuery struct {

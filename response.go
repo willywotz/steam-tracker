@@ -44,6 +44,6 @@ func (r GetPlayerSummariesResponse) Player() *Player {
 		// TimeCreated:              p.TimeCreated,
 		// PersonaStateFlags:        p.PersonaStateFlags,
 		// GameExtraInfo:            p.GameExtraInfo,
-		// GameID:                   p.GameID,
+		GameID: p.GameID,
 	}
 }
