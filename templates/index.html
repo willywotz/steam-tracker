@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>React without JSX</title>
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone@7.10.3/babel.min.js" crossorigin></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+</head>
+
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel" data-presets="react,stage-3">
+    const { useState, useEffect } = React;
+
+    const PlayerEventTimeline = () => {
+      const [playerEvents, setPlayerEvents] = useState([]);
+
+      useEffect(() => {
+        const query = { page: 1, limit: 10, sort_by_created_at: 'desc' };
+        fetchPlayerEvents(query);
+        const intervalId = setInterval(() => fetchPlayerEvents(query), 60 * 1000);
+        return () => clearInterval(intervalId);
+      }, []);
+
+      const fetchPlayerEvents = async ({ page, limit, sort_by_created_at }) => {
+        try {
+          const apiUrl = `/api/player_events`;
+          const params = new URLSearchParams();
+          if (page) params.append('page', page);
+          if (limit) params.append('limit', limit);
+          if (sort_by_created_at) params.append('sort_by[created_at]', sort_by_created_at);
+          const response = await fetch(apiUrl + '?' + params.toString());
+          if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+          }
+          const data = await response.json();
+          setPlayerEvents(data.player_events);
+        } catch (err) {
+          console.error('Error fetching player events:', err);
+          setPlayerEvents([]);
+        }
+      };
+
+      return (
+        <div className="p-4">
+          <h2 className="text-2xl font-bold mb-4">Player Event Timeline</h2>
+          <div className="space-y-4">
+            {playerEvents.map((event) => (
+              <div key={event.id} className="p-4 border rounded shadow-sm">
+                <h3 className="text-lg font-semibold">{event.persona_name}</h3>
+                <p>{event.persona_state}</p>
+                <p className="text-sm text-gray-500">{new Date(event.created_at).toLocaleString()}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    const TimelineGraph = () => {
+      const [timeRange, setTimeRange] = useState('day'); // 'day', 'week', 'month'
+      const [graphData, setGraphData] = useState({});
+      const [loading, setLoading] = useState(false);
+      const [error, setError] = useState(null);
+
+      useEffect(() => {
+        const start_created_at = new Date();
+        start_created_at.setHours(0, 0, 0, 0);
+
+        if (timeRange === 'day') {
+          start_created_at.setDate(start_created_at.getDate() - 1);
+        } else if (timeRange === 'week') {
+          start_created_at.setDate(start_created_at.getDate() - 7);
+        } else if (timeRange === 'month') {
+          start_created_at.setMonth(start_created_at.getMonth() - 1);
+        }
+
+        const query = {
+          start_created_at: start_created_at.toISOString(),
+        };
+
+        fetchTimelineData(query);
+      }, [timeRange]);
+
+      const handleTimeRangeChange = (newRange) => {
+        setTimeRange(newRange);
+      };
+
+      const fetchTimelineData = async ({ steam_id, start_created_at, end_created_at, page, limit, sort_by_created_at }) => {
+        setLoading(true);
+        setError(null);
+
+        try {
+          const apiUrl = `/search_players`;
+          const params = new URLSearchParams();
+          if (steam_id) params.append('steam_id', steam_id);
+          if (start_created_at) params.append('start_created_at', start_created_at);
+          if (end_created_at) params.append('end_created_at', end_created_at);
+          if (page) params.append('page', page);
+          if (limit) params.append('limit', limit);
+          if (sort_by_created_at) params.append('sort_by[created_at]', sort_by_created_at);
+          const response = await fetch(apiUrl+ '?' + params.toString());
+          if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+          }
+          const data = await response.json();
+          const processedData = processGraphData(data, timeRange);
+          setGraphData(processedData);
+        } catch (err) {
+          setError(err.message);
+          setGraphData({});
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      const processGraphData = (data, range) => {
+        // Implement your data processing logic here
+        // This will depend on the format of your API response and the requirements of your graph library.
+        // For example, you might need to group data by day, week, or month and count occurrences.
+        console.log('Processing data for:', range, data);
+        return {
+          labels: [], // Array of labels for the x-axis (e.g., dates, weeks, months)
+          datasets: [
+            {
+              label: 'Timeline Data',
+              data: [], // Array of data points for the y-axis
+              // ... other dataset options
+            },
+          ],
+        };
+      };
+
+      return (
+        <div>
+          <div className="flex justify-center space-x-4 py-4">
+            <button className={`ml-4 inline-flex border-0 py-2 px-6 focus:outline-none rounded text-lg ${timeRange === 'day' ? 'text-white bg-indigo-500' : 'cursor-pointer text-gray-700 bg-gray-100 hover:bg-gray-200'}`} onClick={() => handleTimeRangeChange('day')}>Day</button>
+            <button className={`ml-4 inline-flex border-0 py-2 px-6 focus:outline-none rounded text-lg ${timeRange === 'week' ? 'text-white bg-indigo-500' : 'cursor-pointer text-gray-700 bg-gray-100 hover:bg-gray-200'}`} onClick={() => handleTimeRangeChange('week')}>Week</button>
+            <button className={`ml-4 inline-flex border-0 py-2 px-6 focus:outline-none rounded text-lg ${timeRange === 'month' ? 'text-white bg-indigo-500' : 'cursor-pointer text-gray-700 bg-gray-100 hover:bg-gray-200'}`} onClick={() => handleTimeRangeChange('month')}>Month</button>
+          </div>
+
+          <div>
+            {loading && <p>Loading data...</p>}
+            {error && <p>Error: {error}</p>}
+            {/* Render your graph component here */}
+            {/* {Object.keys(graphData).length > 0 && <Line data={graphData} />} */}
+            {/* Replace <Line> with your actual graph rendering component */}
+            {Object.keys(graphData).length > 0 && (
+              <div style={{ border: '1px solid #ccc', padding: '20px' }}>
+                {/* Placeholder for your graph */}
+                <h3>Timeline Graph</h3>
+                <pre>{JSON.stringify(graphData, null, 2)}</pre>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+    const root = ReactDOM.createRoot(document.getElementById("root"))
+    root.render(<PlayerEventTimeline />);
+  </script>
+</body>
+
+</html>

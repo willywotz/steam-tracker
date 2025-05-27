@@ -12,6 +12,8 @@ type Config struct {
 
 	SteamAPIKey string `json:"steam_api_key"`
 	SteamID     string `json:"steam_id"`
+
+	DisableTask bool `json:"disable_task"`
 }
 
 func (c *Config) Validate() error {

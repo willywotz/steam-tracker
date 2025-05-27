@@ -2,7 +2,9 @@ package steamtracker
 
 import (
 	"context"
+	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -18,6 +20,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 type SteamTracker struct {
@@ -65,7 +68,9 @@ func New(cfg *Config) (*SteamTracker, error) {
 	st.ln = ln
 	log.Debug().Msgf("HTTP listener started on port %s", st.cfg.HTTPPort)
 
-	db, err := gorm.Open(sqlite.Open(st.cfg.DatabaseDSN), &gorm.Config{})
+	db, err := gorm.Open(sqlite.Open(st.cfg.DatabaseDSN), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
 	}
@@ -100,7 +105,9 @@ func (st *SteamTracker) Run() error {
 
 	go st.task()
 
-	st.mux.HandleFunc("/search_players", st.GetSearchPlayers)
+	st.mux.HandleFunc("/api/players", st.GetSearchPlayers)
+	st.mux.HandleFunc("/api/player_events", st.GetSearchPlayerEvents)
+	st.mux.HandleFunc("/", st.GetIndex)
 	go func() { _ = st.hs.Serve(st.ln) }()
 
 	for {
@@ -129,7 +136,7 @@ func (st *SteamTracker) Stop() error {
 	return nil
 }
 
-var dbModels = []any{&Player{}}
+var dbModels = []any{&Player{}, &PlayerEvent{}}
 
 func (st *SteamTracker) AutoMigrate() error {
 	if err := st.db.AutoMigrate(dbModels...); err != nil {
@@ -166,12 +173,12 @@ func (st *SteamTracker) AddPlayer(player *Player) error {
 	player.ID = st.GenerateID()
 	player.CreatedAt = time.Now()
 
-	log.Debug().
+	event := log.Debug().
 		Str("action", "add_player").
 		Int64("steam_id", int64(player.SteamID)).
 		Str("persona_name", player.PersonaName).
-		Str("persona_state", player.PersonaState.String()).
-		Send()
+		Str("persona_state", player.PersonaState.String())
+	defer func() { event.Send() }()
 
 	err := st.db.WithContext(st.ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(player).Error; err != nil {
@@ -180,11 +187,79 @@ func (st *SteamTracker) AddPlayer(player *Player) error {
 
 		return nil
 	})
+	if err != nil {
+		event.Err(err)
+	}
 
 	return err
 }
 
+func (st *SteamTracker) CreatePlayerEvent(cmd *CreatePlayerEventCommand) (*PlayerEvent, error) {
+	event := log.Debug().
+		Str("action", "create_player_event").
+		Int64("steam_id", int64(cmd.SteamID)).
+		Str("persona_name", cmd.PersonaName).
+		Str("persona_state", cmd.PersonaState.String())
+	defer func() { event.Send() }()
+
+	playerEvent := PlayerEvent{
+		SteamID:      cmd.SteamID,
+		PersonaName:  cmd.PersonaName,
+		PersonaState: cmd.PersonaState,
+		CreatedAt:    time.Now(),
+	}
+
+	err := st.db.WithContext(st.ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&playerEvent).Error; err != nil {
+			return fmt.Errorf("failed to create player event: %w", err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		event.Err(err)
+	}
+
+	return &playerEvent, err
+}
+
+func (st *SteamTracker) GetLatestPlayerEvent(query *GetLatestPlayerEventQuery) (*PlayerEvent, error) {
+	event := log.Debug().
+		Str("action", "get_latest_player_event").
+		Int64("steam_id", int64(query.SteamID))
+	defer func() { event.Send() }()
+
+	playerEvent := PlayerEvent{
+		PersonaState: PersonaStateUnknown,
+	}
+
+	err := st.db.WithContext(st.ctx).Transaction(func(tx *gorm.DB) error {
+		ss := tx.Table("(?) as p", tx.Model(&PlayerEvent{}))
+
+		ss = ss.Where("steam_id = ?", query.SteamID)
+		ss = ss.Order("created_at DESC")
+
+		if err := ss.First(&playerEvent).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil // No events found, return empty PlayerEvent
+		} else if err != nil {
+			return fmt.Errorf("failed to get latest player event: %w", err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		event.Err(err)
+	}
+
+	return &playerEvent, err
+}
+
 func (st *SteamTracker) task() {
+	if st.cfg.DisableTask {
+		log.Debug().Msg("Task is disabled, skipping...")
+		return
+	}
+
 	st.wg.Add(1)
 	defer st.wg.Done()
 
@@ -206,23 +281,25 @@ func (st *SteamTracker) task() {
 	if err := st.AddPlayer(player); err != nil {
 		log.Error().Err(err).Msg("Failed to add player")
 	}
-}
 
-type SearchPlayersQuery struct {
-	Page  int `query:"page"`
-	Limit int `query:"limit"`
-
-	SteamID        *SteamID   `json:"steam_id"`
-	StartCreatedAt *time.Time `json:"start_created_at"`
-	EndCreatedAt   *time.Time `json:"end_created_at"`
-}
-
-type SearchPlayersQueryResult struct {
-	TotalCount int64 `json:"totalCount"`
-	Page       int   `json:"page"`
-	PerPage    int   `json:"perPage"`
-
-	Players []*Player `json:"players"`
+	latestEvent, err := st.GetLatestPlayerEvent(&GetLatestPlayerEventQuery{
+		SteamID: player.SteamID,
+	})
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to get latest player event")
+		return
+	}
+	if latestEvent.PersonaState == player.PersonaState {
+		return
+	}
+	if _, err := st.CreatePlayerEvent(&CreatePlayerEventCommand{
+		SteamID:      player.SteamID,
+		PersonaName:  player.PersonaName,
+		PersonaState: player.PersonaState,
+	}); err != nil {
+		log.Error().Err(err).Msg("Failed to create player event")
+		return
+	}
 }
 
 func (st *SteamTracker) SearchPlayers(ctx context.Context, query *SearchPlayersQuery) (*SearchPlayersQueryResult, error) {
@@ -230,9 +307,6 @@ func (st *SteamTracker) SearchPlayers(ctx context.Context, query *SearchPlayersQ
 	defer func() { event.Send() }()
 
 	result := SearchPlayersQueryResult{
-		Page:    query.Page,
-		PerPage: query.Limit,
-
 		Players: make([]*Player, 0),
 	}
 
@@ -263,7 +337,9 @@ func (st *SteamTracker) SearchPlayers(ctx context.Context, query *SearchPlayersQ
 			ss = ss.Where(strings.Join(whereConditions, " AND "), whereParams...)
 		}
 
-		if query.Page > 0 && query.Limit > 0 {
+		if query.Page > 1 && query.Limit > 0 {
+			result.Page = query.Page
+			result.PerPage = query.Limit
 			ss = ss.Offset((query.Page - 1) * query.Limit).Limit(query.Limit)
 			event.Int("page", query.Page).Int("limit", query.Limit)
 		}
@@ -271,6 +347,11 @@ func (st *SteamTracker) SearchPlayers(ctx context.Context, query *SearchPlayersQ
 		if err := ss.Count(&result.TotalCount).Error; err != nil {
 			return fmt.Errorf("failed to count players: %w", err)
 		}
+
+		setOptional(query.SortBy.CreatedAt, func(order string) {
+			ss = ss.Order("p.created_at " + order)
+			event.Str("sort_by_created_at", order)
+		})
 
 		if err := ss.Find(&result.Players).Error; err != nil {
 			return fmt.Errorf("failed to search players: %w", err)
@@ -314,7 +395,17 @@ func (st *SteamTracker) GetSearchPlayers(w http.ResponseWriter, r *http.Request)
 		query.EndCreatedAt = &endCreatedAt
 	}
 
+	if v := r.URL.Query().Get("sort_by[created_at]"); v != "" {
+		sortOrder := strings.ToLower(v)
+		query.SortBy.CreatedAt = &sortOrder
+	}
+
 	_ = json.NewDecoder(r.Body).Decode(&query)
+
+	if err := query.Validate(); err != nil {
+		http.Error(w, fmt.Sprintf("Invalid query parameters: %v", err), http.StatusBadRequest)
+		return
+	}
 
 	result, err := st.SearchPlayers(r.Context(), &query)
 	if err != nil {
@@ -325,6 +416,117 @@ func (st *SteamTracker) GetSearchPlayers(w http.ResponseWriter, r *http.Request)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	if err := json.NewEncoder(w).Encode(result); err != nil {
 		http.Error(w, fmt.Sprintf("Failed to encode response: %v", err), http.StatusInternalServerError)
+		return
+	}
+}
+
+func (st *SteamTracker) SearchPlayerEvents(query *SearchPlayerEventsQuery) (*SearchPlayerEventsQueryResult, error) {
+	event := log.Debug().Str("action", "search_player_events")
+	defer func() { event.Send() }()
+
+	result := SearchPlayerEventsQueryResult{
+		PlayerEvents: make([]*PlayerEvent, 0),
+	}
+
+	err := st.db.WithContext(st.ctx).Transaction(func(tx *gorm.DB) error {
+		whereConditions := make([]string, 0)
+		whereParams := make([]any, 0)
+		ss := tx.Table("(?) as pe", tx.Model(&PlayerEvent{}))
+
+		setOptional(query.SteamID, func(v SteamID) {
+			whereConditions = append(whereConditions, "pe.steam_id = ?")
+			whereParams = append(whereParams, v)
+			event.Str("steam_id", v.String())
+		})
+
+		if len(whereConditions) > 0 {
+			ss = ss.Where(strings.Join(whereConditions, " AND "), whereParams...)
+		}
+
+		if query.Page > 1 && query.Limit > 0 {
+			result.Page = query.Page
+			result.PerPage = query.Limit
+			ss = ss.Offset((query.Page - 1) * query.Limit).Limit(query.Limit)
+			event.Int("page", query.Page).Int("limit", query.Limit)
+		}
+
+		if err := ss.Count(&result.TotalCount).Error; err != nil {
+			return fmt.Errorf("failed to count player events: %w", err)
+		}
+
+		setOptional(query.SortBy.CreatedAt, func(order string) {
+			ss = ss.Order("pe.created_at " + order)
+			event.Str("sort_by_created_at", order)
+		})
+
+		if err := ss.Find(&result.PlayerEvents).Error; err != nil {
+			return fmt.Errorf("failed to search player events: %w", err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		event.Err(err)
+	}
+
+	return &result, err
+}
+
+func (st *SteamTracker) GetSearchPlayerEvents(w http.ResponseWriter, r *http.Request) {
+	query := SearchPlayerEventsQuery{}
+
+	if v := r.URL.Query().Get("page"); v != "" {
+		page, _ := strconv.Atoi(v)
+		query.Page = page
+	}
+
+	if v := r.URL.Query().Get("limit"); v != "" {
+		limit, _ := strconv.Atoi(v)
+		query.Limit = limit
+	}
+
+	if v := r.URL.Query().Get("steam_id"); v != "" {
+		steamIDInt, _ := strconv.ParseInt(v, 10, 64)
+		steamID := SteamID(steamIDInt)
+		query.SteamID = &steamID
+	}
+
+	if v := r.URL.Query().Get("sort_by[created_at]"); v != "" {
+		sortOrder := strings.ToLower(v)
+		query.SortBy.CreatedAt = &sortOrder
+	}
+
+	if err := query.Validate(); err != nil {
+		http.Error(w, fmt.Sprintf("Invalid query parameters: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	result, err := st.SearchPlayerEvents(&query)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to search player events: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err := json.NewEncoder(w).Encode(result); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to encode response: %v", err), http.StatusInternalServerError)
+		return
+	}
+}
+
+//go:embed templates/*
+var fs embed.FS
+
+func (st *SteamTracker) GetIndex(w http.ResponseWriter, r *http.Request) {
+	tmpl, err := fs.ReadFile("templates/index.html")
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to read template: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if _, err := w.Write(tmpl); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to write response: %v", err), http.StatusInternalServerError)
 		return
 	}
 }

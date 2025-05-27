@@ -60,7 +60,8 @@ func (s *SteamID) UnmarshalJSON(data []byte) error {
 }
 
 const (
-	PersonaStateOffline PersonaState = iota
+	PersonaStateUnknown PersonaState = iota - 1 // -1 to handle unknown state
+	PersonaStateOffline
 	PersonaStateOnline
 	PersonaStateBusy
 	PersonaStateAway
@@ -70,6 +71,7 @@ const (
 )
 
 var personaStateNames = map[PersonaState]string{
+	PersonaStateUnknown:        "Unknown",
 	PersonaStateOffline:        "Offline",
 	PersonaStateOnline:         "Online",
 	PersonaStateBusy:           "Busy",
@@ -123,4 +125,108 @@ func (ps *PersonaState) fromString(stateName string) error {
 		}
 	}
 	return fmt.Errorf("unknown persona state: %s", stateName)
+}
+
+type SearchPlayersQuery struct {
+	Page  int `query:"page"`
+	Limit int `query:"limit"`
+
+	SteamID        *SteamID   `json:"steam_id"`
+	StartCreatedAt *time.Time `json:"start_created_at"`
+	EndCreatedAt   *time.Time `json:"end_created_at"`
+
+	SortBy struct {
+		CreatedAt *string `json:"created_at"`
+	} `json:"sort_by"`
+}
+
+func (query *SearchPlayersQuery) Validate() error {
+	if query.Page < 1 {
+		query.Page = 1
+	}
+	if query.Limit < 1 || query.Limit > 100 {
+		query.Limit = 25
+	}
+
+	if query.SteamID != nil && *query.SteamID < 0 {
+		return fmt.Errorf("invalid SteamID: %d", *query.SteamID)
+	}
+
+	if query.StartCreatedAt != nil && query.EndCreatedAt != nil && query.StartCreatedAt.After(*query.EndCreatedAt) {
+		return fmt.Errorf("start_created_at cannot be after end_created_at")
+	}
+
+	if query.SortBy.CreatedAt != nil {
+		if *query.SortBy.CreatedAt != "asc" && *query.SortBy.CreatedAt != "desc" {
+			return fmt.Errorf("invalid sort order for created_at: %s, must be 'asc' or 'desc'", *query.SortBy.CreatedAt)
+		}
+	}
+
+	return nil
+}
+
+type SearchPlayersQueryResult struct {
+	TotalCount int64 `json:"totalCount"`
+	Page       int   `json:"page"`
+	PerPage    int   `json:"perPage"`
+
+	Players []*Player `json:"players"`
+}
+
+type PlayerEvent struct {
+	ID           int64        `json:"id" gorm:"primaryKey"`
+	SteamID      SteamID      `json:"steam_id"`
+	PersonaName  string       `json:"persona_name"`
+	PersonaState PersonaState `json:"persona_state"`
+	CreatedAt    time.Time    `json:"created_at"`
+}
+
+type CreatePlayerEventCommand struct {
+	SteamID      SteamID      `json:"steam_id"`
+	PersonaName  string       `json:"persona_name"`
+	PersonaState PersonaState `json:"persona_state"`
+}
+
+type GetLatestPlayerEventQuery struct {
+	SteamID SteamID `json:"steam_id"`
+}
+
+type SearchPlayerEventsQuery struct {
+	Page  int `query:"page"`
+	Limit int `query:"limit"`
+
+	SteamID *SteamID `json:"steam_id"`
+
+	SortBy struct {
+		CreatedAt *string `json:"created_at"`
+	} `json:"sort_by"`
+}
+
+func (query *SearchPlayerEventsQuery) Validate() error {
+	if query.Page < 1 {
+		query.Page = 1
+	}
+	if query.Limit < 1 || query.Limit > 100 {
+		query.Limit = 25
+	}
+
+	if query.SteamID != nil && *query.SteamID < 0 {
+		return fmt.Errorf("invalid SteamID: %d", *query.SteamID)
+	}
+
+	if query.SortBy.CreatedAt != nil {
+		if *query.SortBy.CreatedAt != "asc" && *query.SortBy.CreatedAt != "desc" {
+			return fmt.Errorf("invalid sort order for created_at: %s, must be 'asc' or 'desc'", *query.SortBy.CreatedAt)
+		}
+	}
+
+	return nil
+}
+
+type SearchPlayerEventsQueryResult struct {
+	TotalCount int64 `json:"total_count"`
+	Page       int   `json:"page"`
+	PerPage    int   `json:"per_page"`
+
+	PlayerEvents []*PlayerEvent `json:"player_events"`
 }

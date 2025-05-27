@@ -26,6 +26,7 @@ func main() {
 			&cli.StringFlag{Name: "log-level", Value: "info", Usage: "Set the logging level (debug, info, warn, error, fatal, panic)", Sources: cli.EnvVars("LOG_LEVEL")},
 			&cli.StringFlag{Name: "steam-api-key", Sources: cli.EnvVars("STEAM_API_KEY")},
 			&cli.StringFlag{Name: "steam-id", Sources: cli.EnvVars("STEAM_ID")},
+			&cli.BoolFlag{Name: "disable-task", Value: false, Sources: cli.EnvVars("DISABLE_TASK")},
 		},
 		Before: func(ctx context.Context, cmd *cli.Command) (context.Context, error) {
 			if cmd.String("log-level") != "" {
@@ -46,6 +47,7 @@ func main() {
 				HTTPPort:        cmd.String("http-port"),
 				SteamAPIKey:     cmd.String("steam-api-key"),
 				SteamID:         cmd.String("steam-id"),
+				DisableTask:     cmd.Bool("disable-task"),
 			}
 
 			log.Info().Msg("Creating SteamTracker instance")
