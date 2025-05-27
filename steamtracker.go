@@ -3,6 +3,7 @@ package steamtracker
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"sync"
@@ -18,9 +19,10 @@ import (
 type SteamTracker struct {
 	cfg *Config
 
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     *sync.WaitGroup
+	ctx        context.Context
+	cancel     context.CancelFunc
+	wg         *sync.WaitGroup
+	httpClient *http.Client
 
 	db        *gorm.DB
 	snowflake *snowflake.Node
@@ -36,9 +38,10 @@ func New(cfg *Config) (*SteamTracker, error) {
 	st := SteamTracker{
 		cfg: cfg,
 
-		ctx:    ctx,
-		cancel: cancel,
-		wg:     &sync.WaitGroup{},
+		ctx:        ctx,
+		cancel:     cancel,
+		wg:         &sync.WaitGroup{},
+		httpClient: &http.Client{Timeout: 10 * time.Second},
 	}
 
 	log.Debug().Msg("Initializing SteamTracker with configuration")
@@ -54,6 +57,10 @@ func New(cfg *Config) (*SteamTracker, error) {
 	}
 	st.db = db
 	log.Debug().Msg("Connected to database successfully")
+
+	if err := st.AutoMigrate(); err != nil {
+		return nil, fmt.Errorf("failed to auto-migrate database: %w", err)
+	}
 
 	log.Debug().Msg("Creating snowflake node")
 	snowflakeNode, err := snowflake.NewNode(st.cfg.SnowflakeNodeID)
@@ -74,18 +81,15 @@ func (st *SteamTracker) Run() error {
 	stopCh := make(chan os.Signal, 1)
 	signal.Notify(stopCh, os.Interrupt, syscall.SIGTERM)
 
-	ticker := time.NewTicker(time.Second)
+	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
+
+	go st.task()
 
 	for {
 		select {
 		case <-ticker.C:
-			st.wg.Add(1)
-
-			go func() {
-				defer st.wg.Done()
-				log.Info().Msg("Performing periodic task...")
-			}()
+			go st.task()
 		case <-stopCh:
 			log.Info().Msg("shutting down...")
 			return st.Stop()
@@ -101,18 +105,30 @@ func (st *SteamTracker) Stop() error {
 	return nil
 }
 
+func (st *SteamTracker) AutoMigrate() error {
+	log.Debug().Msg("Running auto-migration database")
+	if err := st.db.AutoMigrate(&Player{}); err != nil {
+		return fmt.Errorf("failed to migrate database: %w", err)
+	}
+
+	return nil
+}
+
 func (st *SteamTracker) ResetDatabase() error {
 	if !st.cfg.ResetDatabase {
 		log.Debug().Msg("Database reset is disabled, skipping...")
 		return nil
 	}
+
 	log.Debug().Msg("Resetting database...")
 	if err := st.db.Migrator().DropTable(&Player{}); err != nil {
-		return fmt.Errorf("failed to drop Player table: %w", err)
+		return fmt.Errorf("failed to drop table: %w", err)
 	}
-	if err := st.db.AutoMigrate(&Player{}); err != nil {
-		return fmt.Errorf("failed to migrate Player table: %w", err)
+
+	if err := st.AutoMigrate(); err != nil {
+		return fmt.Errorf("failed to auto-migrate database: %w", err)
 	}
+
 	log.Debug().Msg("Database reset successfully")
 	return nil
 }
@@ -125,7 +141,13 @@ func (st *SteamTracker) AddPlayer(player *Player) error {
 	player.ID = st.GenerateID()
 	player.CreatedAt = time.Now()
 
-	log.Debug().Msgf("Adding player with SteamID: %d, PersonaName: %s", player.SteamID, player.PersonaName)
+	log.Debug().
+		Str("action", "add_player").
+		Int64("steam_id", int64(player.SteamID)).
+		Str("persona_name", player.PersonaName).
+		Str("persona_state", player.PersonaState.String()).
+		Send()
+
 	err := st.db.WithContext(st.ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(player).Error; err != nil {
 			return fmt.Errorf("failed to create player in transaction: %w", err)
@@ -134,7 +156,29 @@ func (st *SteamTracker) AddPlayer(player *Player) error {
 		return nil
 	})
 
-	log.Debug().Msgf("Added player: %+v", player)
-
 	return err
+}
+
+func (st *SteamTracker) task() {
+	st.wg.Add(1)
+	defer st.wg.Done()
+
+	log.Debug().Msg("Starting task...")
+
+	result, err := GetPlayerSummaries(st.httpClient, st.cfg.SteamAPIKey, st.cfg.SteamID)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to get player summaries")
+		return
+	}
+
+	if result.Player() == nil {
+		log.Warn().Msg("No player data found")
+		return
+	}
+
+	player := result.Player()
+
+	if err := st.AddPlayer(player); err != nil {
+		log.Error().Err(err).Msg("Failed to add player")
+	}
 }
