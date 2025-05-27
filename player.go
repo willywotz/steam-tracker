@@ -8,24 +8,24 @@ import (
 )
 
 type Player struct {
-	ID                       int64        `json:"id" gorm:"primaryKey"`
-	SteamID                  SteamID      `json:"steam_id" gorm:"index"`
-	CommunityVisibilityState int          `json:"community_visibility_state"`
-	ProfileState             int          `json:"profile_state"`
-	PersonaName              string       `json:"persona_name"`
-	ProfileUrl               string       `json:"profile_url"`
-	Avatar                   string       `json:"avatar"`
-	AvatarMedium             string       `json:"avatar_medium"`
-	AvatarFull               string       `json:"avatar_full"`
-	AvatarHash               string       `json:"avatar_hash"`
-	LastLogoff               int          `json:"last_logoff"`
-	PersonaState             PersonaState `json:"persona_state"`
-	PrimaryClanID            string       `json:"primary_clan_id"`
-	TimeCreated              int          `json:"time_created"`
-	PersonaStateFlags        int          `json:"persona_state_flags"`
-	GameExtraInfo            string       `json:"game_extra_info"`
-	GameID                   string       `json:"game_id"`
-	CreatedAt                time.Time    `json:"created_at" gorm:"index"`
+	ID      int64   `json:"id" gorm:"primaryKey"`
+	SteamID SteamID `json:"steam_id" gorm:"index"`
+	// CommunityVisibilityState int          `json:"community_visibility_state"`
+	ProfileState int    `json:"profile_state"`
+	PersonaName  string `json:"persona_name"`
+	// ProfileUrl   string `json:"profile_url"`
+	// Avatar                   string       `json:"avatar"`
+	// AvatarMedium             string       `json:"avatar_medium"`
+	// AvatarFull               string       `json:"avatar_full"`
+	AvatarHash   string       `json:"avatar_hash"`
+	LastLogoff   int          `json:"last_logoff"`
+	PersonaState PersonaState `json:"persona_state"`
+	// PrimaryClanID     string       `json:"primary_clan_id"`
+	// TimeCreated int `json:"time_created"`
+	// PersonaStateFlags int       `json:"persona_state_flags"`
+	// GameExtraInfo     string    `json:"game_extra_info"`
+	// GameID            string    `json:"game_id"`
+	CreatedAt time.Time `json:"created_at" gorm:"index"`
 }
 
 type SteamID int64
