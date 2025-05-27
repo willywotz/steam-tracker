@@ -42,7 +42,7 @@ func retry[T any](fn func() (*T, error), retries int) (*T, error) {
 		if err == nil {
 			return result, nil
 		}
-		time.Sleep(5 * time.Second)
+		time.Sleep(15 * time.Second)
 	}
 
 	return result, fmt.Errorf("failed after %d retries: %w", retries, err)

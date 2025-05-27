@@ -22,6 +22,7 @@ func main() {
 			&cli.StringFlag{Name: "database-dsn", Sources: cli.EnvVars("DATABASE_DSN")},
 			&cli.Int64Flag{Name: "snowflake-node-id", Sources: cli.EnvVars("SNOWFLAKE_NODE_ID")},
 			&cli.BoolFlag{Name: "reset-database", Sources: cli.EnvVars("RESET_DATABASE")},
+			&cli.StringFlag{Name: "http-port", Value: "8080", Usage: "HTTP server port", Sources: cli.EnvVars("HTTP_PORT")},
 			&cli.StringFlag{Name: "log-level", Value: "info", Usage: "Set the logging level (debug, info, warn, error, fatal, panic)", Sources: cli.EnvVars("LOG_LEVEL")},
 			&cli.StringFlag{Name: "steam-api-key", Sources: cli.EnvVars("STEAM_API_KEY")},
 			&cli.StringFlag{Name: "steam-id", Sources: cli.EnvVars("STEAM_ID")},
@@ -42,6 +43,7 @@ func main() {
 				DatabaseDSN:     cmd.String("database-dsn"),
 				SnowflakeNodeID: cmd.Int64("snowflake-node-id"),
 				ResetDatabase:   cmd.Bool("reset-database"),
+				HTTPPort:        cmd.String("http-port"),
 				SteamAPIKey:     cmd.String("steam-api-key"),
 				SteamID:         cmd.String("steam-id"),
 			}

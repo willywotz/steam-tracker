@@ -2,10 +2,14 @@ package steamtracker
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -22,6 +26,9 @@ type SteamTracker struct {
 	ctx        context.Context
 	cancel     context.CancelFunc
 	wg         *sync.WaitGroup
+	ln         net.Listener
+	hs         *http.Server
+	mux        *http.ServeMux
 	httpClient *http.Client
 
 	db        *gorm.DB
@@ -44,13 +51,20 @@ func New(cfg *Config) (*SteamTracker, error) {
 		httpClient: &http.Client{Timeout: 10 * time.Second},
 	}
 
-	log.Debug().Msg("Initializing SteamTracker with configuration")
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
 	}
-	log.Debug().Msg("Configuration validated successfully")
 
-	log.Debug().Msg("Connecting to database")
+	st.mux = http.NewServeMux()
+	st.hs = &http.Server{Handler: st.mux}
+
+	ln, err := net.Listen("tcp", ":"+st.cfg.HTTPPort)
+	if err != nil {
+		return nil, fmt.Errorf("failed to start HTTP listener on port %s: %w", st.cfg.HTTPPort, err)
+	}
+	st.ln = ln
+	log.Debug().Msgf("HTTP listener started on port %s", st.cfg.HTTPPort)
+
 	db, err := gorm.Open(sqlite.Open(st.cfg.DatabaseDSN), &gorm.Config{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
@@ -61,8 +75,8 @@ func New(cfg *Config) (*SteamTracker, error) {
 	if err := st.AutoMigrate(); err != nil {
 		return nil, fmt.Errorf("failed to auto-migrate database: %w", err)
 	}
+	log.Debug().Msg("Database auto-migration completed successfully")
 
-	log.Debug().Msg("Creating snowflake node")
 	snowflakeNode, err := snowflake.NewNode(st.cfg.SnowflakeNodeID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create snowflake node: %w", err)
@@ -86,6 +100,9 @@ func (st *SteamTracker) Run() error {
 
 	go st.task()
 
+	st.mux.HandleFunc("/search_players", st.GetSearchPlayers)
+	go func() { _ = st.hs.Serve(st.ln) }()
+
 	for {
 		select {
 		case <-ticker.C:
@@ -100,14 +117,22 @@ func (st *SteamTracker) Run() error {
 func (st *SteamTracker) Stop() error {
 	st.cancel()
 
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := st.hs.Shutdown(ctx); err != nil {
+		return fmt.Errorf("failed to shutdown HTTP server: %w", err)
+	}
+
 	st.wg.Wait()
 
 	return nil
 }
 
+var dbModels = []any{&Player{}}
+
 func (st *SteamTracker) AutoMigrate() error {
-	log.Debug().Msg("Running auto-migration database")
-	if err := st.db.AutoMigrate(&Player{}); err != nil {
+	if err := st.db.AutoMigrate(dbModels...); err != nil {
 		return fmt.Errorf("failed to migrate database: %w", err)
 	}
 
@@ -121,7 +146,7 @@ func (st *SteamTracker) ResetDatabase() error {
 	}
 
 	log.Debug().Msg("Resetting database...")
-	if err := st.db.Migrator().DropTable(&Player{}); err != nil {
+	if err := st.db.Migrator().DropTable(dbModels...); err != nil {
 		return fmt.Errorf("failed to drop table: %w", err)
 	}
 
@@ -129,7 +154,7 @@ func (st *SteamTracker) ResetDatabase() error {
 		return fmt.Errorf("failed to auto-migrate database: %w", err)
 	}
 
-	log.Debug().Msg("Database reset successfully")
+	log.Debug().Msg("Database reset completed successfully")
 	return nil
 }
 
@@ -180,5 +205,126 @@ func (st *SteamTracker) task() {
 
 	if err := st.AddPlayer(player); err != nil {
 		log.Error().Err(err).Msg("Failed to add player")
+	}
+}
+
+type SearchPlayersQuery struct {
+	Page  int `query:"page"`
+	Limit int `query:"limit"`
+
+	SteamID        *SteamID   `json:"steam_id"`
+	StartCreatedAt *time.Time `json:"start_created_at"`
+	EndCreatedAt   *time.Time `json:"end_created_at"`
+}
+
+type SearchPlayersQueryResult struct {
+	TotalCount int64 `json:"totalCount"`
+	Page       int   `json:"page"`
+	PerPage    int   `json:"perPage"`
+
+	Players []*Player `json:"players"`
+}
+
+func (st *SteamTracker) SearchPlayers(ctx context.Context, query *SearchPlayersQuery) (*SearchPlayersQueryResult, error) {
+	event := log.Debug().Str("action", "search_players")
+	defer func() { event.Send() }()
+
+	result := SearchPlayersQueryResult{
+		Page:    query.Page,
+		PerPage: query.Limit,
+
+		Players: make([]*Player, 0),
+	}
+
+	err := st.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		whereConditions := make([]string, 0)
+		whereParams := make([]any, 0)
+		ss := tx.Table("(?) as p", tx.Model(&Player{}))
+
+		setOptional(query.SteamID, func(v SteamID) {
+			whereConditions = append(whereConditions, "p.steam_id = ?")
+			whereParams = append(whereParams, v)
+			event.Str("steam_id", v.String())
+		})
+
+		setOptional(query.StartCreatedAt, func(v time.Time) {
+			whereConditions = append(whereConditions, "p.created_at >= ?")
+			whereParams = append(whereParams, v)
+			event.Time("start_created_at", v)
+		})
+
+		setOptional(query.EndCreatedAt, func(v time.Time) {
+			whereConditions = append(whereConditions, "p.created_at <= ?")
+			whereParams = append(whereParams, v)
+			event.Time("end_created_at", v)
+		})
+
+		if len(whereConditions) > 0 {
+			ss = ss.Where(strings.Join(whereConditions, " AND "), whereParams...)
+		}
+
+		if query.Page > 0 && query.Limit > 0 {
+			ss = ss.Offset((query.Page - 1) * query.Limit).Limit(query.Limit)
+			event.Int("page", query.Page).Int("limit", query.Limit)
+		}
+
+		if err := ss.Count(&result.TotalCount).Error; err != nil {
+			return fmt.Errorf("failed to count players: %w", err)
+		}
+
+		if err := ss.Find(&result.Players).Error; err != nil {
+			return fmt.Errorf("failed to search players: %w", err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		event.Err(err)
+	}
+
+	return &result, err
+}
+
+func (st *SteamTracker) GetSearchPlayers(w http.ResponseWriter, r *http.Request) {
+	query := SearchPlayersQuery{}
+
+	if v := r.URL.Query().Get("page"); v != "" {
+		page, _ := strconv.Atoi(v)
+		query.Page = page
+	}
+
+	if v := r.URL.Query().Get("limit"); v != "" {
+		limit, _ := strconv.Atoi(v)
+		query.Limit = limit
+	}
+
+	if v := r.URL.Query().Get("steam_id"); v != "" {
+		steamIDInt, _ := strconv.ParseInt(v, 10, 64)
+		steamID := SteamID(steamIDInt)
+		query.SteamID = &steamID
+	}
+
+	if v := r.URL.Query().Get("start_created_at"); v != "" {
+		startCreatedAt, _ := time.Parse(time.RFC3339, v)
+		query.StartCreatedAt = &startCreatedAt
+	}
+
+	if v := r.URL.Query().Get("end_created_at"); v != "" {
+		endCreatedAt, _ := time.Parse(time.RFC3339, v)
+		query.EndCreatedAt = &endCreatedAt
+	}
+
+	_ = json.NewDecoder(r.Body).Decode(&query)
+
+	result, err := st.SearchPlayers(r.Context(), &query)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to search players: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err := json.NewEncoder(w).Encode(result); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to encode response: %v", err), http.StatusInternalServerError)
+		return
 	}
 }
