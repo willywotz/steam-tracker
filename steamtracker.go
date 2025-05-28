@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/bwmarrin/snowflake"
+	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -93,7 +95,34 @@ func New(cfg *Config) (*SteamTracker, error) {
 		return nil, fmt.Errorf("failed to reset database: %w", err)
 	}
 
+	writers := []io.Writer{
+		&zerolog.FilteredLevelWriter{
+			Writer: zerolog.LevelWriterAdapter{Writer: &st},
+			Level:  zerolog.DebugLevel,
+		},
+		&zerolog.FilteredLevelWriter{
+			Writer: zerolog.LevelWriterAdapter{Writer: os.Stdout},
+			Level:  st.cfg.LogLevel,
+		},
+		&zerolog.FilteredLevelWriter{
+			Writer: zerolog.LevelWriterAdapter{Writer: os.Stderr},
+			Level:  zerolog.ErrorLevel,
+		},
+	}
+
+	log.Logger = log.Output(zerolog.MultiLevelWriter(writers...))
+
 	return &st, nil
+}
+
+func (st *SteamTracker) Write(p []byte) (n int, err error) {
+	if _, err := st.CreateAuditLog(&CreateAuditLogCommand{
+		Raw: JSON(p),
+	}); err != nil {
+		return 0, fmt.Errorf("failed to write audit log: %w", err)
+	}
+
+	return len(p), nil
 }
 
 func (st *SteamTracker) Run() error {
@@ -107,6 +136,7 @@ func (st *SteamTracker) Run() error {
 
 	st.mux.HandleFunc("/api/players", st.GetSearchPlayers)
 	st.mux.HandleFunc("/api/player_events", st.GetSearchPlayerEvents)
+	st.mux.HandleFunc("/api/audit_logs", st.GetSearchAuditLogs)
 	st.mux.HandleFunc("/", st.GetIndex)
 	go func() { _ = st.hs.Serve(st.ln) }()
 
@@ -136,7 +166,7 @@ func (st *SteamTracker) Stop() error {
 	return nil
 }
 
-var dbModels = []any{&Player{}, &PlayerEvent{}}
+var dbModels = []any{&Player{}, &PlayerEvent{}, &AuditLog{}}
 
 func (st *SteamTracker) AutoMigrate() error {
 	if err := st.db.AutoMigrate(dbModels...); err != nil {
@@ -169,16 +199,34 @@ func (st *SteamTracker) GenerateID() int64 {
 	return st.snowflake.Generate().Int64()
 }
 
-func (st *SteamTracker) AddPlayer(player *Player) error {
-	player.ID = st.GenerateID()
-	player.CreatedAt = time.Now()
+func (st *SteamTracker) CreateAuditLog(cmd *CreateAuditLogCommand) (*AuditLog, error) {
+	auditLog := cmd.AuditLog()
+	auditLog.ID = st.GenerateID()
+	auditLog.CreatedAt = time.Now()
 
+	err := st.db.WithContext(st.ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&auditLog).Error; err != nil {
+			return fmt.Errorf("failed to create audit log: %w", err)
+		}
+
+		return nil
+	})
+
+	return &auditLog, err
+}
+
+func (st *SteamTracker) AddPlayer(player *Player) error {
 	event := log.Debug().
 		Str("action", "add_player").
 		Int64("steam_id", int64(player.SteamID)).
 		Str("persona_name", player.PersonaName).
 		Str("persona_state", player.PersonaState.String())
 	defer func() { event.Send() }()
+
+	player.ID = st.GenerateID()
+	event.Int64("id", player.ID)
+	player.CreatedAt = time.Now()
+	event.Time("created_at", player.CreatedAt)
 
 	err := st.db.WithContext(st.ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(player).Error; err != nil {
@@ -204,7 +252,9 @@ func (st *SteamTracker) CreatePlayerEvent(cmd *CreatePlayerEventCommand) (*Playe
 
 	playerEvent := cmd.PlayerEvent()
 	playerEvent.ID = st.GenerateID()
+	event.Int64("id", playerEvent.ID)
 	playerEvent.CreatedAt = time.Now()
+	event.Time("created_at", playerEvent.CreatedAt)
 
 	err := st.db.WithContext(st.ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(&playerEvent).Error; err != nil {
@@ -334,13 +384,6 @@ func (st *SteamTracker) SearchPlayers(ctx context.Context, query *SearchPlayersQ
 			ss = ss.Where(strings.Join(whereConditions, " AND "), whereParams...)
 		}
 
-		if query.Page > 0 && query.Limit > 0 {
-			result.Page = query.Page
-			result.PerPage = query.Limit
-			ss = ss.Offset((query.Page - 1) * query.Limit).Limit(query.Limit)
-			event.Int("page", query.Page).Int("limit", query.Limit)
-		}
-
 		if err := ss.Count(&result.TotalCount).Error; err != nil {
 			return fmt.Errorf("failed to count players: %w", err)
 		}
@@ -349,6 +392,13 @@ func (st *SteamTracker) SearchPlayers(ctx context.Context, query *SearchPlayersQ
 			ss = ss.Order("p.created_at " + order)
 			event.Str("sort_by_created_at", order)
 		})
+
+		if query.Page > 0 && query.Limit > 0 {
+			result.Page = query.Page
+			result.PerPage = query.Limit
+			ss = ss.Offset((query.Page - 1) * query.Limit).Limit(query.Limit)
+			event.Int("page", query.Page).Int("limit", query.Limit)
+		}
 
 		if err := ss.Find(&result.Players).Error; err != nil {
 			return fmt.Errorf("failed to search players: %w", err)
@@ -440,13 +490,6 @@ func (st *SteamTracker) SearchPlayerEvents(query *SearchPlayerEventsQuery) (*Sea
 			ss = ss.Where(strings.Join(whereConditions, " AND "), whereParams...)
 		}
 
-		if query.Page > 0 && query.Limit > 0 {
-			result.Page = query.Page
-			result.PerPage = query.Limit
-			ss = ss.Offset((query.Page - 1) * query.Limit).Limit(query.Limit)
-			event.Int("page", query.Page).Int("limit", query.Limit)
-		}
-
 		if err := ss.Count(&result.TotalCount).Error; err != nil {
 			return fmt.Errorf("failed to count player events: %w", err)
 		}
@@ -455,6 +498,13 @@ func (st *SteamTracker) SearchPlayerEvents(query *SearchPlayerEventsQuery) (*Sea
 			ss = ss.Order("pe.created_at " + order)
 			event.Str("sort_by_created_at", order)
 		})
+
+		if query.Page > 0 && query.Limit > 0 {
+			result.Page = query.Page
+			result.PerPage = query.Limit
+			ss = ss.Offset((query.Page - 1) * query.Limit).Limit(query.Limit)
+			event.Int("page", query.Page).Int("limit", query.Limit)
+		}
 
 		if err := ss.Find(&result.PlayerEvents).Error; err != nil {
 			return fmt.Errorf("failed to search player events: %w", err)
@@ -503,6 +553,84 @@ func (st *SteamTracker) GetSearchPlayerEvents(w http.ResponseWriter, r *http.Req
 	result, err := st.SearchPlayerEvents(&query)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to search player events: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err := json.NewEncoder(w).Encode(result); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to encode response: %v", err), http.StatusInternalServerError)
+		return
+	}
+}
+
+func (st *SteamTracker) SearchAuditLogs(query *SearchAuditLogsQuery) (*SearchAuditLogsQueryResult, error) {
+	event := log.Debug().Str("action", "search_audit_logs")
+	defer func() { event.Send() }()
+
+	result := SearchAuditLogsQueryResult{
+		AuditLogs: make([]*AuditLog, 0),
+	}
+
+	err := st.db.WithContext(st.ctx).Transaction(func(tx *gorm.DB) error {
+		ss := tx.Table("(?) as al", tx.Model(&AuditLog{}))
+
+		if err := ss.Count(&result.TotalCount).Error; err != nil {
+			return fmt.Errorf("failed to count audit logs: %w", err)
+		}
+
+		if query.Page > 0 && query.Limit > 0 {
+			result.Page = query.Page
+			result.PerPage = query.Limit
+			ss = ss.Offset((query.Page - 1) * query.Limit).Limit(query.Limit)
+			event.Int("page", query.Page).Int("limit", query.Limit)
+		}
+
+		setOptional(query.SortBy.ID, func(order string) {
+			ss = ss.Order("al.id " + order)
+			event.Str("sort_by_id", order)
+		})
+
+		if err := ss.Find(&result.AuditLogs).Error; err != nil {
+			return fmt.Errorf("failed to search audit logs: %w", err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		event.Err(err)
+	}
+
+	return &result, err
+}
+
+func (st *SteamTracker) GetSearchAuditLogs(w http.ResponseWriter, r *http.Request) {
+	query := SearchAuditLogsQuery{}
+
+	if v := r.URL.Query().Get("page"); v != "" {
+		page, _ := strconv.Atoi(v)
+		query.Page = page
+	}
+
+	if v := r.URL.Query().Get("limit"); v != "" {
+		limit, _ := strconv.Atoi(v)
+		query.Limit = limit
+	}
+
+	if v := r.URL.Query().Get("sort_by[id]"); v != "" {
+		sortOrder := strings.ToLower(v)
+		query.SortBy.ID = &sortOrder
+	}
+
+	_ = json.NewDecoder(r.Body).Decode(&query)
+
+	if err := query.Validate(); err != nil {
+		http.Error(w, fmt.Sprintf("Invalid query parameters: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	result, err := st.SearchAuditLogs(&query)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to search audit logs: %v", err), http.StatusInternalServerError)
 		return
 	}
 

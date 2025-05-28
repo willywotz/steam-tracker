@@ -30,18 +30,13 @@ func main() {
 			&cli.IntFlag{Name: "max-task-retry-count", Value: 3, Sources: cli.EnvVars("MAX_TASK_RETRY_COUNT")},
 			&cli.IntFlag{Name: "task-interval", Value: 60, Sources: cli.EnvVars("TASK_INTERVAL")},
 		},
-		Before: func(ctx context.Context, cmd *cli.Command) (context.Context, error) {
-			if cmd.String("log-level") != "" {
-				level, err := zerolog.ParseLevel(cmd.String("log-level"))
-				if err != nil {
-					return ctx, fmt.Errorf("invalid log level: %w", err)
-				}
-				log.Logger = log.Level(level)
-			}
-
-			return ctx, nil
-		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
+			level, err := zerolog.ParseLevel(cmd.String("log-level"))
+			if err != nil {
+				return fmt.Errorf("invalid log level: %w", err)
+			}
+			log.Logger = log.Level(level)
+
 			cfg := &steamtracker.Config{
 				DatabaseDSN:       cmd.String("database-dsn"),
 				SnowflakeNodeID:   cmd.Int64("snowflake-node-id"),
@@ -52,6 +47,7 @@ func main() {
 				DisableTask:       cmd.Bool("disable-task"),
 				MaxTaskRetryCount: cmd.Int("max-task-retry-count"),
 				TaskInterval:      cmd.Int("task-interval"),
+				LogLevel:          level,
 			}
 
 			log.Info().Msg("Creating SteamTracker instance")

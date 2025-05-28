@@ -2,6 +2,8 @@ package steamtracker
 
 import (
 	"fmt"
+
+	"github.com/rs/zerolog"
 )
 
 type Config struct {
@@ -16,7 +18,8 @@ type Config struct {
 	MaxTaskRetryCount int `json:"max_task_retry_count"`
 	TaskInterval      int `json:"task_interval"` // in seconds
 
-	DisableTask bool `json:"disable_task"`
+	DisableTask bool          `json:"disable_task"`
+	LogLevel    zerolog.Level `json:"log_level"`
 }
 
 func (c *Config) Validate() error {
