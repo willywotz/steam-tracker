@@ -334,7 +334,7 @@ func (st *SteamTracker) SearchPlayers(ctx context.Context, query *SearchPlayersQ
 			ss = ss.Where(strings.Join(whereConditions, " AND "), whereParams...)
 		}
 
-		if query.Page > 1 && query.Limit > 0 {
+		if query.Page > 0 && query.Limit > 0 {
 			result.Page = query.Page
 			result.PerPage = query.Limit
 			ss = ss.Offset((query.Page - 1) * query.Limit).Limit(query.Limit)
@@ -440,7 +440,7 @@ func (st *SteamTracker) SearchPlayerEvents(query *SearchPlayerEventsQuery) (*Sea
 			ss = ss.Where(strings.Join(whereConditions, " AND "), whereParams...)
 		}
 
-		if query.Page > 1 && query.Limit > 0 {
+		if query.Page > 0 && query.Limit > 0 {
 			result.Page = query.Page
 			result.PerPage = query.Limit
 			ss = ss.Offset((query.Page - 1) * query.Limit).Limit(query.Limit)
@@ -492,6 +492,8 @@ func (st *SteamTracker) GetSearchPlayerEvents(w http.ResponseWriter, r *http.Req
 		sortOrder := strings.ToLower(v)
 		query.SortBy.CreatedAt = &sortOrder
 	}
+
+	_ = json.NewDecoder(r.Body).Decode(&query)
 
 	if err := query.Validate(); err != nil {
 		http.Error(w, fmt.Sprintf("Invalid query parameters: %v", err), http.StatusBadRequest)
