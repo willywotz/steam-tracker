@@ -50,8 +50,8 @@
         <div className="p-4 border rounded shadow-md bg-white">
           <h2 className="text-2xl font-bold mb-4">Player Event Timeline</h2>
           <div className="grid gap-4 grid-cols-[repeat(auto-fill,minmax(200px,2fr))]">
-            {playerEvents.map((event) => (
-              <div key={event.id} className="p-4 border rounded shadow-sm">
+            {playerEvents.map((event, index) => (
+              <div key={event.id} className={`p-4 border rounded shadow-sm bg-sky-500/${(100/playerEvents.length)*(playerEvents.length - index)}`}>
                 <h3 className="text-lg font-semibold">{event.persona_name}</h3>
                 <p>{event.persona_state}</p>
                 <p className="text-sm text-gray-500">{new Date(event.created_at).toLocaleString()}</p>
